@@ -1,34 +1,22 @@
-#include <WiFi.h>             // WiFi control for ESP32
-#include <ThingsBoard.h>      // ThingsBoard SDK
-#include "esp_wpa2.h"   //wpa2 library for connections to Enterprise networks
+#include <WiFi.h>
+#include <ThingsBoard.h>
+#include "esp_wpa2.h"
 #include <Wire.h>
 
-// Define Slave I2C Address. All slaves must be allocated a
-// unique number
+// Nucleo address
 #define SLAVE_ADDR 9
 
-// Define the pins used for SDA and SCL. This is important because
-// there is a problem with the TTGO and I2C will not work properly
-// unless you do.
+// Pins for I2C data transfer and clock.
 #define I2C_SDA 21
 #define I2C_SCL 22
 
-//#define EAP_IDENTITY "insert your user name@ucl.ac.uk here"                
-//#define EAP_PASSWORD "insert your password here"
-//const char* ssid = "eduroam";
-
 // WiFi
-//
 #define WIFI_AP_NAME        "zoltan"
 #define WIFI_PASSWORD       "zoltan123"
 
 
 // Helper macro to calculate array size
 #define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
-
-// See https://thingsboard.io/docs/getting-started-guides/helloworld/
-//
-
 
 #define TOKEN               "ePT1c7vn6CDhCNmqta0m"
 #define THINGSBOARD_SERVER  "demo.thingsboard.io"
@@ -38,50 +26,50 @@ PubSubClient client(espClient);
 ThingsBoard tb(espClient);      // Initialize ThingsBoard instance
 int status = WL_IDLE_STATUS;    // the Wifi radio's status
 
-int quant = 1;                  // Main application loop delay
+int quant = 1;                  // 50
 int updateDelay = 10000;        // Initial update delay.
 int lastUpdate  = 0;            // Time of last update.
 bool subscribed = false;        // Set to true if application is subscribed for the RPC messages.
-int temp = 0; // ? change to double
-int pH = 0; // ? change to double
-int rpm = 0;
-int r_temp, r_ph, r_rpm;
 
-// Processes function for RPC call "setValue"
-// RPC_Data is a JSON variant, that can be queried using operator[]
-// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
+// Initialise current variables and target defaults.
+double current_temp, current_ph, target_temp = 30, target_ph = 5;
+int current_rpm, target_rpm = 1250;
+
+// Size for I2C byte array.
+const int size = sizeof(double)*2 + sizeof(int);
+
+
 RPC_Response processTemperatureChange(const RPC_Data &data)
 {
-  Serial.println("Received the set temperature RPC method");
+  Serial.println("--- TEMP CHANGE ---");
 
   // Process data
-  r_temp = data;
+  target_temp = data;
   Serial.print("Temperature: ");
-  Serial.println(r_temp);
+  Serial.println(target_temp);
 
   return RPC_Response();
 }
 
 RPC_Response processPhChange(const RPC_Data &data)
 {
-  Serial.println("Received the set ph RPC method");
+  Serial.println("--- PH CHANGE ---");
 
   // Process data
-  r_ph = data;
+  target_ph = data;
   Serial.print("Ph: ");
-  Serial.println(r_ph);
+  Serial.println(target_ph);
 
   return RPC_Response();
 }
 
 RPC_Response processRpmChange(const RPC_Data &data)
 {
-  Serial.println("Received the set rpm RPC method");
-
+  Serial.println("--- RPM CHANGE ---");
   // Process data
-  r_rpm = data;
+  target_rpm = data;
   Serial.print("RPM : ");
-  Serial.println(r_rpm);
+  Serial.println(target_rpm);
 
   return RPC_Response();
 }
@@ -93,6 +81,7 @@ RPC_Callback callbacks[callbacks_size] = {
   { "setRPM",            processRpmChange }
 };
 
+// ---------------------------------------------------
 
 void InitWiFi()
 {
@@ -120,23 +109,36 @@ void reconnect() {
   }
 }
 
+// ---------------------------------------------------
+
+void packData(byte* data, double t, double p, int r) {
+  memcpy(data, &t, sizeof(double));
+  memcpy(data + sizeof(double), &p, sizeof(double));
+  memcpy(data + sizeof(double)*2, &r, sizeof(int));
+}
+
+void unpackData(byte* data, double* t, double* p, int* r) {
+  memcpy(t, data, sizeof(double));
+  memcpy(p, data + sizeof(double), sizeof(double));
+  memcpy(r, data + sizeof(double)*2, sizeof(int));
+}
+
+// ---------------------------------------------------
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(I2C_SDA, I2C_SCL); // Configure the pins
-  // tft.init();
-  // tft.setRotation(1);
+  Wire.begin(I2C_SDA, I2C_SCL);
 
   WiFi.begin(WIFI_AP_NAME, WIFI_PASSWORD);
   InitWiFi();
+  Serial.println("Setup complete.");
 }
 
 
 void loop() {
   long now = millis();
- // device SLAVE_ADDR
 
-  delay(300);
+  delay(quant);
 
   // Reconnect to WiFi, if needed
   if (WiFi.status() != WL_CONNECTED) {
@@ -174,30 +176,35 @@ void loop() {
     subscribed = true;
   }
 
-  Wire.requestFrom(SLAVE_ADDR, 3); // request 3 bytes from slave
-  //delay(10);
-  while (1<Wire.available()) { // slave may send less than requested
-    temp = Wire.read();
-    pH = Wire.read();
-    rpm = Wire.read();
-  }
-
-  //Serial.print(temp); Serial.print(" "); Serial.print(pH); Serial.print(" "); Serial.println(rpm);
-
-  // Uploads new telemetry to ThingsBoard using MQTT. 
-  // See https://thingsboard.io/docs/reference/mqtt-api/#telemetry-upload-api 
-  // for more details
-  tb.sendTelemetryFloat("Temperature", temp);
-  tb.sendTelemetryFloat("pH", pH);
-  tb.sendTelemetryFloat("RPM", rpm);
-
-  Serial.println("sending to arduino");
-  // wire.write for pH temp RPM
+  // Send the target values from ThingsBoard to the Nucleo.
+  byte data[size];
+  packData(data, target_temp, target_ph, target_rpm);
   Wire.beginTransmission(SLAVE_ADDR);
-  Wire.write(r_temp);
-  Wire.write(r_ph);
-  Wire.write(r_rpm);
+  Wire.write(data, size);
   Wire.endTransmission();
+
+  // Wait before requesting the current values from the Nucleo.
+  // This ensure that the wire buffer is emptied before we request.
+  delay(10);
+
+  Wire.requestFrom(SLAVE_ADDR, size);
+  if (Wire.available()) {
+    byte data[size];
+    int i=0;
+    while (Wire.available() && i<size) {
+      data[i] = Wire.read();
+      i++;
+    }
+    unpackData(data, &current_temp, &current_ph, &current_rpm);
+
+    // Log the data.
+    Serial.print("Received payload: "); Serial.print(current_temp); Serial.print(" "); Serial.print(current_ph); Serial.print(" "); Serial.println(current_rpm);
+    
+    // Send data to Thingsboard.
+    tb.sendTelemetryFloat("Temperature", current_temp);
+    tb.sendTelemetryFloat("pH", current_ph);
+    tb.sendTelemetryFloat("RPM", current_rpm);
+  }
 
   // Process messages
   tb.loop();   

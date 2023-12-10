@@ -1,144 +1,204 @@
+#include <WiFi.h>             // WiFi control for ESP32
+#include <ThingsBoard.h>      // ThingsBoard SDK
+#include "esp_wpa2.h"   //wpa2 library for connections to Enterprise networks
 #include <Wire.h>
 
+// Define Slave I2C Address. All slaves must be allocated a
+// unique number
 #define SLAVE_ADDR 9
-#define PH_PROBE A0
-#define THERMISTOR A1
-#define ALKALI_PUMP 11 // black
-#define ACID_PUMP 10 // red
 
-int target_temp = 30, target_ph = 5, target_rpm = 400; // Initial values. TODO: Change to double.
-int current_temp = 0, current_ph = 0, current_rpm = 0; // Change to double.
+// Define the pins used for SDA and SCL. This is important because
+// there is a problem with the TTGO and I2C will not work properly
+// unless you do.
+#define I2C_SDA 21
+#define I2C_SCL 22
 
-// Initial values for the stirring subsystem.
-const float Kv=800;
-const float T=0.25;
+//#define EAP_IDENTITY "insert your user name@ucl.ac.uk here"                
+//#define EAP_PASSWORD "insert your password here"
+//const char* ssid = "eduroam";
 
-const float wn=4;
-const float zeta=1;
+// WiFi
+//
+#define WIFI_AP_NAME        "zoltan"
+#define WIFI_PASSWORD       "zoltan123"
 
-// Calculate the required PI controller parameters
-const float wo=1/T;
-// corresponding motor response frequency in rad/s
-const float Kp=(2*zeta*wn/wo-1)/Kv;
-const float KI=wn*wn/Kv/wo;
-//And finally we need to declare the remaining constants and variables:
-const byte encoderpin=2, motorpin=6;
-long currtime, prevtime, pulseT, prevpulseT, prevprevpulseT, T1, T2;
-float measspeed, meanmeasspeed, freq, error, KIinterror, deltaT;
-bool ctrl;
-int Vmotor, onoff;
 
-void reach_ph(double target_pH) {
-  int current_bits = analogRead(PH_PROBE);
-  Serial.print("current_bits: "); Serial.println(current_bits);
+// Helper macro to calculate array size
+#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 
-  // Straight line constants.
-  double m = 3.0456;
-  double c = 3.939;
+// See https://thingsboard.io/docs/getting-started-guides/helloworld/
+//
 
-  int target_bits = (((target_ph - c) / m) / 3.3) * 1023;
-  Serial.print("target bits: "); Serial.println(target_bits);
-  int tolerance = (((ph_tolerance - c) / m) / 3.3) * 1023;
 
-  int bit_error = abs((int)(current_bits - target_bits));
+#define TOKEN               "ePT1c7vn6CDhCNmqta0m"
+#define THINGSBOARD_SERVER  "demo.thingsboard.io"
 
-  int pwm_value = 120;
+WiFiClient espClient;           // Initialize ThingsBoard client
+PubSubClient client(espClient);
+ThingsBoard tb(espClient);      // Initialize ThingsBoard instance
+int status = WL_IDLE_STATUS;    // the Wifi radio's status
 
-  if (bit_error < tolerance) {
-    // Turn off both of the pumps.
-    digitalWrite(ALKALI_PUMP, LOW);
-    digitalWrite(ACID_PUMP, LOW);
-    Serial.println("turning both off.");
-  }
-  else if (current_bits < target_bits) {
-    // Turn the alkali pump.
-    digitalWrite(ACID_PUMP, LOW);
-    analogWrite(ALKALI_PUMP, pwm_value);
-    Serial.println("Turn on alkali pump.");
-  }
-  else if (current_bits > target_bits) {
-    // Turn on the acid pump.
-    analogWrite(ACID_PUMP, pwm_value);
-    digitalWrite(ALKALI_PUMP, LOW);
-    Serial.println("Turn on acid pump");
-  }
+int quant = 1;                  // Main application loop delay
+int updateDelay = 10000;        // Initial update delay.
+int lastUpdate  = 0;            // Time of last update.
+bool subscribed = false;        // Set to true if application is subscribed for the RPC messages.
+int temp = 0; // ? change to double
+int pH = 0; // ? change to double
+int rpm = 0;
+int r_temp, r_ph, r_rpm;
+
+// Processes function for RPC call "setValue"
+// RPC_Data is a JSON variant, that can be queried using operator[]
+// See https://arduinojson.org/v5/api/jsonvariant/subscript/ for more details
+RPC_Response processTemperatureChange(const RPC_Data &data)
+{
+  Serial.println("Received the set temperature RPC method");
+
+  // Process data
+  r_temp = data;
+  Serial.print("Temperature: ");
+  Serial.println(r_temp);
+
+  return RPC_Response();
 }
 
-void freqcount() {
-  pulseT= micros();
-  if(pulseT-prevpulseT>6000){
-    // Attempt to mitigate sensor false triggers due to PWM current spikes, apparent speeds > 2500 RPM
-    freq= 1e6/float(pulseT-prevprevpulseT);
+RPC_Response processPhChange(const RPC_Data &data)
+{
+  Serial.println("Received the set ph RPC method");
+
+  // Process data
+  r_ph = data;
+  Serial.print("Ph: ");
+  Serial.println(r_ph);
+
+  return RPC_Response();
+}
+
+RPC_Response processRpmChange(const RPC_Data &data)
+{
+  Serial.println("Received the set rpm RPC method");
+
+  // Process data
+  r_rpm = data;
+  Serial.print("RPM : ");
+  Serial.println(r_rpm);
+
+  return RPC_Response();
+}
+// RPC handlers
+const size_t callbacks_size = 3;
+RPC_Callback callbacks[callbacks_size] = {
+  { "setTemperature",    processTemperatureChange },
+  { "setpH",             processPhChange },
+  { "setRPM",            processRpmChange }
+};
+
+
+void InitWiFi()
+{
+  Serial.println("Connecting to AP ...");
+  // attempt to connect to WiFi network
+
+  WiFi.begin(WIFI_AP_NAME, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Connected to AP");
+}
+
+void reconnect() {
+  // Loop until we're reconnected
+  status = WiFi.status();
+  if ( status != WL_CONNECTED) {
+    WiFi.begin(WIFI_AP_NAME, WIFI_PASSWORD);
+    while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
     }
-  // Calculate speed sensor frequency
-  prevprevpulseT= prevpulseT;
-  prevpulseT= pulseT;
+    Serial.println("Connected to AP");
   }
-
-// function that executes whenever data is requested by master
-// this function is registered as an event, see setup()
-void requestEvent() {
-  delay(10);
-  // Serial.println("Request event called.");
-  Serial.print("Nucleo data: "); Serial.print(temp); Serial.print(" "); Serial.print(pH); Serial.print(" "); Serial.println(RPM);
-  Wire.write(current_temp);
-  Wire.write(current_ph);
-  Wire.write(current_rpm);
 }
 
-void receiveEvent(int bits) {
-  while (Wire.available()) {
-    target_temp = Wire.read();
-    target_ph = Wire.read();
-    target_rpm = Wire.read();
-    }
-    Serial.print("ESP data: "); Serial.print(target_temp); Serial.print(" "); Serial.print(target_ph); Serial.print(" "); Serial.println(target_rpm);
-    // ! Add reach functions.
-    reach_ph(target_ph);
-}
 
 void setup() {
-  // Connectivity subsystem
-  Wire.begin(SLAVE_ADDR); // join i2c bus with address #8
-  Wire.onRequest(requestEvent); // register event
-  Wire.onReceive(receiveEvent); // register event
-  
-  // pH subsystem.
-  pinMode(ALKALI_PUMP, OUTPUT);
-  pinMode(ACID_PUMP, OUTPUT);
-  digitalWrite(ALKALI_PUMP, LOW);
-  digitalWrite(ACID_PUMP, LOW);
+  Serial.begin(115200);
+  Wire.begin(I2C_SDA, I2C_SCL); // Configure the pins
+  // tft.init();
+  // tft.setRotation(1);
 
-  // Stirrer subsystem.
-  pinMode(encoderpin, INPUT);
-  pinMode(motorpin, OUTPUT);
-  attachInterrupt(digitalPinToInterrupt(encoderpin), freqcount, CHANGE);
-  analogWriteResolution(10); // 10-bit PWM -TCCR1A = 0b00000011; for Uno/Nano
-  analogWriteFrequency(8000); //8 kHz PWM -TCCR1B = 0b00000001; for Uno/Nano
-  analogWrite(motorpin, 0);
-
- // Data logging.
- Serial.begin(9600);
- Serial.println("Setup complete.");
+  WiFi.begin(WIFI_AP_NAME, WIFI_PASSWORD);
+  InitWiFi();
 }
 
+
 void loop() {
-  currtime = micros();
-  deltaT = (currtime-prevtime)*1e-6;
-  if(ctrl==1 && currtime-T2>1000000) {ctrl=0;}
-  if (ctrl==0 && digitalRead(A2)==0) {onoff++; ctrl=1; T2=currtime; target_rpm=400;} // ! Based off ESP input1!!!
-  if (currtime-T1 > 0) {
-    prevtime = currtime;
-    T1 = T1+10000;
-    measspeed = freq*30;
-    if (currtime-pulseT>5e5) {measspeed=0; meanmeasspeed=0;}
-    error = target_rpm-measspeed;
-    KIinterror = KIinterror+KI*error*deltaT;
-    KIinterror = constrain(KIinterror,0,3);
-    Vmotor = round(204*(Kp*error+KIinterror));
-    Vmotor = constrain(Vmotor, 0, 150);
-    analogWrite(motorpin, Vmotor);
-    meanmeasspeed = 0.1*measspeed+0.9*meanmeasspeed;
-    current_rpm = meanmeasspeed;
+  long now = millis();
+ // device SLAVE_ADDR
+
+  delay(300);
+
+  // Reconnect to WiFi, if needed
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnect();
+    return;
   }
+
+  // Reconnect to ThingsBoard, if needed
+  if (!tb.connected()) {
+    subscribed = false;
+
+    // Connect to the ThingsBoard
+    Serial.print("Connecting to: ");
+    Serial.print(THINGSBOARD_SERVER);
+    Serial.print(" with token ");
+    Serial.println(TOKEN);
+    if (!tb.connect(THINGSBOARD_SERVER, TOKEN)) {
+      Serial.println("Failed to connect");
+      return;
+    }
+  }
+
+  // Subscribe for RPC, if needed
+  if (!subscribed) {
+    Serial.println("Subscribing for RPC...");
+
+    // Perform a subscription. All consequent data processing will happen in
+    // callbacks as denoted by callbacks[] array.
+    if (!tb.RPC_Subscribe(callbacks, COUNT_OF(callbacks))) {
+      Serial.println("Failed to subscribe for RPC");
+      return;
+    }
+
+    Serial.println("Subscribe done");
+    subscribed = true;
+  }
+
+  Wire.requestFrom(SLAVE_ADDR, 3); // request 3 bytes from slave
+  //delay(10);
+  while (1<Wire.available()) { // slave may send less than requested
+    temp = Wire.read();
+    pH = Wire.read();
+    rpm = Wire.read();
+  }
+
+  //Serial.print(temp); Serial.print(" "); Serial.print(pH); Serial.print(" "); Serial.println(rpm);
+
+  // Uploads new telemetry to ThingsBoard using MQTT. 
+  // See https://thingsboard.io/docs/reference/mqtt-api/#telemetry-upload-api 
+  // for more details
+  tb.sendTelemetryFloat("Temperature", temp);
+  tb.sendTelemetryFloat("pH", pH);
+  tb.sendTelemetryFloat("RPM", rpm);
+
+  Serial.println("sending to arduino");
+  // wire.write for pH temp RPM
+  Wire.beginTransmission(SLAVE_ADDR);
+  Wire.write(r_temp);
+  Wire.write(r_ph);
+  Wire.write(r_rpm);
+  Wire.endTransmission();
+
+  // Process messages
+  tb.loop();   
 }

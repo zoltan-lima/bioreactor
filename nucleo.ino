@@ -33,7 +33,7 @@ int control = 1;
 
 // Required values for the pH subsystem.
 const double ph_tolerance = 0.5;
-const double prev_target_ph = 5;
+double prev_target_ph = 5;
 long last_change;
 int ph_pwm_value = 100;
 
@@ -80,11 +80,11 @@ void reach_ph(double target_pH) {
   else if (current_bits < target_bits) {
     // Turn the alkali pump.
     digitalWrite(ACID_PUMP, LOW);
-    analogWrite(ALKALI_PUMP, pwm_value);
+    analogWrite(ALKALI_PUMP, ph_pwm_value);
   }
   else if (current_bits > target_bits) {
     // Turn on the acid pump.
-    analogWrite(ACID_PUMP, pwm_value);
+    analogWrite(ACID_PUMP, ph_pwm_value);
     digitalWrite(ALKALI_PUMP, LOW);
   }
 }

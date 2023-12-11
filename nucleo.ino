@@ -33,6 +33,9 @@ int control = 1;
 
 // Required values for the pH subsystem.
 const double ph_tolerance = 0.5;
+const double prev_target_ph = 5;
+long last_change;
+int ph_pwm_value = 100;
 
 // Required values for the stirring subsystem.
 const float Kv=800;
@@ -63,7 +66,11 @@ void reach_ph(double target_pH) {
 
   int bit_error = abs((int)(current_bits - target_bits));
 
-  int pwm_value = 120; // Constant PWM so we don't kill the motors.
+  // Ramp up the speed instead of setting to max straight away (so gears don't shear).
+  long currtime = micros();
+  long diff = currtime - last_change;
+  if (diff >= 500000) {ph_pwm_value = ph_pwm_value + 20; last_change = currtime;} // If 0.5s have passed since last speed bump, increase speed.
+  ph_pwm_value = constrain(ph_pwm_value, 0, 180); // Cap at 180 for safety.
 
   if (bit_error < tolerance) {
     // Turn off both of the pumps.
@@ -171,9 +178,16 @@ void loop() {
   analogWrite(HEATING_ELEMENT, Pheater);
 
   // pH subsystem.
+  if (prev_target_ph != target_ph) {
+    prev_target_ph = target_ph;
+    ph_pwm_value = 100;
+    last_change = micros();
+  }
   reach_ph(target_ph);
 
   // Stirring subsystem.
+  currtime = micros();
+  deltaT = (currtime-prevtime)*1e-6;
   /*
   if(ctrl==1 && currtime-T2>1000000) {ctrl=0;}
   if (ctrl==0 && digitalRead(A2)==0) {onoff++; ctrl=1; T2=currtime; target_rpm=400;} // ! Based off ESP input1!!!

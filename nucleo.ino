@@ -1,7 +1,7 @@
 #include <Wire.h>
 
-// Address for I2C communication.
-#define SLAVE_ADDR 9
+// Pin for I2C communication.
+#define ESP32 9
 
 // Temperature pins.
 #define THERMISTOR A0
@@ -20,16 +20,19 @@
 double current_temp, current_ph, target_temp = 30, target_ph = 5;
 int current_rpm, target_rpm = 1250;
 
-// Size for I2C byte array.
-const int size = sizeof(double)*2 + sizeof(int);
+// Struct for PI controllers.
+struct controller {
+  float Kp, Ki;
+  float error, interror;
+  float output;
+};
+
+// Required values for PI calculations.
+long currtime, prevtime, deltaT;
 
 // Required values for the temp subsystem.
-const float t_Ki = 0.351, t_Kp = 100; // assumes PIoutpin (0-1023 PWM) scales to 0 - 1023 W
-const float Tcal = 0.1; // assumes 20.5 K/V temp sensor (Tcal = 20.5*5/1023)
-long t_currtime, t_prevtime;
-float t_deltaT, Te, TeInt;
-int Pheater;
-int control = 1;
+controller t;
+t.Ki = 0.351; t.Kp = 100; t.interror = 0; t.output = 0;
 
 // Required values for the pH subsystem.
 const double ph_tolerance = 0.5;
@@ -45,14 +48,26 @@ const float wn=4;
 const float zeta=1;
 
 const float wo=1/T;
-// corresponding motor response frequency in rad/s
-const float Kp=(2*zeta*wn/wo-1)/Kv;
-const float KI=wn*wn/Kv/wo;
-//And finally we need to declare the remaining constants and variables:
-long currtime, prevtime, pulseT, prevpulseT, prevprevpulseT, T1, T2;
-float measspeed, meanmeasspeed, freq, error, KIinterror, deltaT;
-bool ctrl;
-int Vmotor, onoff;
+
+controller s;
+s.Ki = wn*wn/Kv/wo; s.Kp = (2*zeta*wn/wo-1)/Kv; s.interror = 0; s.output = 0;
+
+long pulseT, prevpulseT, prevprevpulseT;
+
+// Size for I2C byte array.
+const int size = sizeof(double)*2 + sizeof(int);
+
+void packData(byte* data, double t, double p, int r) {
+  memcpy(data, &t, sizeof(double));
+  memcpy(data + sizeof(double), &p, sizeof(double));
+  memcpy(data + sizeof(double)*2, &r, sizeof(int));
+}
+
+void unpackData(byte* data, double* t, double* p, int* r) {
+  memcpy(t, data, sizeof(double));
+  memcpy(p, data + sizeof(double), sizeof(double));
+  memcpy(r, data + sizeof(double)*2, sizeof(int));
+}
 
 void reach_ph(double target_pH) {
   int current_bits = analogRead(PH_PROBE);
@@ -68,8 +83,8 @@ void reach_ph(double target_pH) {
 
   // Ramp up the speed instead of setting to max straight away (so gears don't shear).
   long currtime = micros();
-  long diff = currtime - last_change;
-  if (diff >= 500000) {ph_pwm_value = ph_pwm_value + 20; last_change = currtime;} // If 0.5s have passed since last speed bump, increase speed.
+  long delta_time = currtime - last_change;
+  if (delta_time >= 500000) {ph_pwm_value = ph_pwm_value + 20; last_change = currtime;} // If 0.5s have passed since last speed bump, increase speed.
   ph_pwm_value = constrain(ph_pwm_value, 0, 180); // Cap at 180 for safety.
 
   if (bit_error < tolerance) {
@@ -78,7 +93,7 @@ void reach_ph(double target_pH) {
     digitalWrite(ACID_PUMP, LOW);
   }
   else if (current_bits < target_bits) {
-    // Turn the alkali pump.
+    // Turn on the alkali pump.
     digitalWrite(ACID_PUMP, LOW);
     analogWrite(ALKALI_PUMP, ph_pwm_value);
   }
@@ -89,54 +104,51 @@ void reach_ph(double target_pH) {
   }
 }
 
-void freqcount() {
-  pulseT= micros();
-  if(pulseT-prevpulseT>6000){
-    // Attempt to mitigate sensor false triggers due to PWM current spikes, apparent speeds > 2500 RPM
-    freq= 1e6/float(pulseT-prevprevpulseT);
-  }
-  // Calculate speed sensor frequency
-  prevprevpulseT= prevpulseT;
-  prevpulseT= pulseT;
-}
-
-void packData(byte* data, double t, double p, int r) {
-  memcpy(data, &t, sizeof(double));
-  memcpy(data + sizeof(double), &p, sizeof(double));
-  memcpy(data + sizeof(double)*2, &r, sizeof(int));
-}
-
-void unpackData(byte* data, double* t, double* p, int* r) {
-  memcpy(t, data, sizeof(double));
-  memcpy(p, data + sizeof(double), sizeof(double));
-  memcpy(r, data + sizeof(double)*2, sizeof(int));
-}
-
 void requestEvent() {
   // ESP32 is requesting current data.
+
+  // Wait before sending the current values to the ESP32.
+  // This ensure that the wire buffer is emptied before we request.
   delay(10);
+
   byte data[size];
   packData(data, current_temp, current_ph, current_rpm);
+
   // Send the data to the ESP32.
   Wire.write(data, size);
 }
 
 void receiveEvent(int bits) {
-  // ESP32 has sent over the new target values from ThingsBoard.
+  // Received new target values from ThingsBoard.
   byte data[size];
   int i = 0;
   while (Wire.available()) {
     data[i] = Wire.read();
     i++;
   }
+
   unpackData(data, &target_temp, &target_ph, &target_rpm);
-  Serial.print("Received payload: "); Serial.print(target_temp); Serial.print(" "); Serial.print(target_ph); Serial.print(" "); Serial.println(target_rpm);
+
+  // Log the data
+  Serial.print("Received payload: "); Serial.println("{"); Serial.print("  \"Temperature\": "); Serial.print(target_temp); Serial.println(","); Serial.print("  \"pH\": "); Serial.print(target_ph); Serial.println(","); Serial.print("  \"RPM\": "); Serial.println(target_rpm); Serial.println("}");
 }
 
+
+void freqcount() {
+  pulseT = micros();
+  if(pulseT-prevpulseT>6000){
+    // Mitigate sensor false triggers (due to PWM current spikes).
+    freq = 1e6/float(pulseT-prevprevpulseT);
+  }
+
+  // Calculate frequency
+  prevprevpulseT = prevpulseT;
+  prevpulseT = pulseT;
+}
 void setup() {
   // Connectivity subsystem.
-  Wire.begin(SLAVE_ADDR);
-  Wire.onRequest(requestEvent); // register event so whenever a request is received, the requestEvent function is called.
+  Wire.begin(ESP32);
+  Wire.onRequest(requestEvent);
   Wire.onReceive(receiveEvent);
 
   // Temperature subsystem.
@@ -144,7 +156,7 @@ void setup() {
   pinMode(HEATING_ELEMENT, OUTPUT);
   
   // pH subsystem.
-  // pinMode(PH_PROBE, INPUT);
+  pinMode(PH_PROBE, INPUT);
   pinMode(ALKALI_PUMP, OUTPUT);
   pinMode(ACID_PUMP, OUTPUT);
   digitalWrite(ALKALI_PUMP, LOW);
@@ -153,9 +165,9 @@ void setup() {
   // Stirrer subsystem.
   pinMode(INTERRUPT, INPUT);
   pinMode(MOTOR, OUTPUT);
-  attachInterrupt(digitalPinToInterrupt(INTERRUPT), freqcount, CHANGE);
-  analogWriteResolution(10); // 10-bit PWM -TCCR1A = 0b00000011; for Uno/Nano
-  analogWriteFrequency(8000); //8 kHz PWM -TCCR1B = 0b00000001; for Uno/Nano
+  attachInterrupt(digitalPinToInterrupt(INTERRUPT), freqcount, CHANGE); // IR sensor will interrupt program when 1/2 revolutions detected.
+  analogWriteResolution(10);
+  analogWriteFrequency(8000);
   analogWrite(MOTOR, 0);
 
  // Data logging.
@@ -164,18 +176,23 @@ void setup() {
 }
 
 void loop() {
-  // Heating subsystem
-  t_currtime = micros();
-  t_deltaT = (t_currtime-t_prevtime)*1e-6;
-  t_prevtime = t_currtime;
-  int bits = analogRead(THERMISTOR);
-  current_temp = -0.9545*bits+72.66;
-  Te = target_temp-current_temp; // Temperature error.
+  currtime = micros();
+  deltaT = (currtime-prevtime)*1e-6;
+  prevtime = currtime;
 
-  TeInt = TeInt + Te*t_deltaT*control;
-  Pheater = round(t_Kp*Te+t_Ki*TeInt);
-  Pheater = constrain(Pheater,0,100);
-  analogWrite(HEATING_ELEMENT, Pheater);
+  // Heating subsystem
+  int bits = analogRead(THERMISTOR);
+
+  // Straight line constants
+  double m = 0.10053;
+  int c = 27;
+  current_temp = (m * (double)bits) + (double)c;
+  t.error = target_temp-current_temp;
+
+  t.interror = t.output + (t.error * deltaT);
+  t.output = round((t.Kp * t.interror) + (t.Ki * t.interror));
+  t.output = constrain(t.output, 0, 180);
+  analogWrite(HEATING_ELEMENT, t.output);
 
   // pH subsystem.
   if (prev_target_ph != target_ph) {
@@ -186,24 +203,12 @@ void loop() {
   reach_ph(target_ph);
 
   // Stirring subsystem.
-  currtime = micros();
-  deltaT = (currtime-prevtime)*1e-6;
-  /*
-  if(ctrl==1 && currtime-T2>1000000) {ctrl=0;}
-  if (ctrl==0 && digitalRead(A2)==0) {onoff++; ctrl=1; T2=currtime; target_rpm=400;} // ! Based off ESP input1!!!
-  */
-  if (currtime-T1 > 0) {
-    prevtime = currtime;
-    T1 = T1+10000;
-    measspeed = freq*30;
-    if (currtime-pulseT>5e5) {measspeed=0; meanmeasspeed=0;}
-    error = target_rpm-measspeed;
-    KIinterror = KIinterror+KI*error*deltaT;
-    KIinterror = constrain(KIinterror,0,3);
-    Vmotor = round(204*(Kp*error+KIinterror));
-    Vmotor = constrain(Vmotor, 0, 150);
-    analogWrite(MOTOR, Vmotor);
-    meanmeasspeed = 0.1*measspeed+0.9*meanmeasspeed;
-    current_rpm = meanmeasspeed;
-  }
+  int measspeed = freq * (60 / 2);
+  s.error = target_rpm - measspeed;
+  s.interror = s.interror + (s.Ki * s.error * deltaT);
+  s.interror = constrain(s.interror, 0, 3);
+  s.output = round(204*((s.Kp * s.error) + s.interror));
+  s.output = constrain(s.output, 0, 180);
+  analogWrite(MOTOR, s.output);
+  current_rpm = (0.1 * measspeed) + (0.9 * current_rpm);
 }

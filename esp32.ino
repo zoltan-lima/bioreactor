@@ -1,35 +1,32 @@
-#include <WiFi.h>
-#include <ThingsBoard.h>
-#include "esp_wpa2.h"
 #include <Wire.h>
-
-// Nucleo address
-#define SLAVE_ADDR 9
+#include <WiFi.h>
+#include "esp_wpa2.h"
+#include <ThingsBoard.h>
 
 // Pins for I2C data transfer and clock.
+#define NUCLEO 9
 #define I2C_SDA 21
 #define I2C_SCL 22
 
-// WiFi
-#define WIFI_AP_NAME        "zoltan"
-#define WIFI_PASSWORD       "zoltan123"
+// WiFi credentials
+#define SSID ""
+#define PASSWORD ""
 
 
 // Helper macro to calculate array size
 #define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 
-#define TOKEN               "ePT1c7vn6CDhCNmqta0m"
-#define THINGSBOARD_SERVER  "demo.thingsboard.io"
+// ThingsBoard credentials
+#define SERVER "demo.thingsboard.io"
+#define TOKEN ""
 
-WiFiClient espClient;           // Initialize ThingsBoard client
-PubSubClient client(espClient);
-ThingsBoard tb(espClient);      // Initialize ThingsBoard instance
-int status = WL_IDLE_STATUS;    // the Wifi radio's status
+// Initialise WiFi, PubSub (MQTT) and ThingsBoard clients.
+WiFiClient wifi;
+PubSubClient client(wifi);
+ThingsBoard tb(wifi);
 
-int quant = 1;                  // 50
-int updateDelay = 10000;        // Initial update delay.
-int lastUpdate  = 0;            // Time of last update.
-bool subscribed = false;        // Set to true if application is subscribed for the RPC messages.
+int loop_delay = 1; // ms of delay for loop function.
+bool subscribed = false; // flag for when ESP is subscribed to ThingsBoard.
 
 // Initialise current variables and target defaults.
 double current_temp, current_ph, target_temp = 30, target_ph = 5;
@@ -37,79 +34,6 @@ int current_rpm, target_rpm = 1250;
 
 // Size for I2C byte array.
 const int size = sizeof(double)*2 + sizeof(int);
-
-
-RPC_Response processTemperatureChange(const RPC_Data &data)
-{
-  Serial.println("--- TEMP CHANGE ---");
-
-  // Process data
-  target_temp = data;
-  Serial.print("Temperature: ");
-  Serial.println(target_temp);
-
-  return RPC_Response();
-}
-
-RPC_Response processPhChange(const RPC_Data &data)
-{
-  Serial.println("--- PH CHANGE ---");
-
-  // Process data
-  target_ph = data;
-  Serial.print("Ph: ");
-  Serial.println(target_ph);
-
-  return RPC_Response();
-}
-
-RPC_Response processRpmChange(const RPC_Data &data)
-{
-  Serial.println("--- RPM CHANGE ---");
-  // Process data
-  target_rpm = data;
-  Serial.print("RPM : ");
-  Serial.println(target_rpm);
-
-  return RPC_Response();
-}
-// RPC handlers
-const size_t callbacks_size = 3;
-RPC_Callback callbacks[callbacks_size] = {
-  { "setTemperature",    processTemperatureChange },
-  { "setpH",             processPhChange },
-  { "setRPM",            processRpmChange }
-};
-
-// ---------------------------------------------------
-
-void InitWiFi()
-{
-  Serial.println("Connecting to AP ...");
-  // attempt to connect to WiFi network
-
-  WiFi.begin(WIFI_AP_NAME, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("Connected to AP");
-}
-
-void reconnect() {
-  // Loop until we're reconnected
-  status = WiFi.status();
-  if ( status != WL_CONNECTED) {
-    WiFi.begin(WIFI_AP_NAME, WIFI_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.print(".");
-    }
-    Serial.println("Connected to AP");
-  }
-}
-
-// ---------------------------------------------------
 
 void packData(byte* data, double t, double p, int r) {
   memcpy(data, &t, sizeof(double));
@@ -123,14 +47,73 @@ void unpackData(byte* data, double* t, double* p, int* r) {
   memcpy(r, data + sizeof(double)*2, sizeof(int));
 }
 
-// ---------------------------------------------------
+void connect() {
+  Serial.print("Connecting to network: "); Serial.println(SSID);
+
+  // Connext to the WiFi network.
+  WiFi.begin(SSID, PASSWORD);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  // WiFi is now connected.
+  Serial.println("Wifi connected.");
+  Serial.print("IP address: "); Serial.println(WiFi.localIP());
+}
+
+// Responses to ThingsBoard RPC requests.
+RPC_Response processTemperatureChange(const RPC_Data &data) {
+  target_temp = data;
+
+  Serial.println("--- TEMP CHANGE ---");
+  Serial.print("Temperature: ");
+  Serial.println(target_temp);
+  Serial.println("-------------------");
+
+  return RPC_Response();
+}
+
+RPC_Response processPhChange(const RPC_Data &data) {
+  target_ph = data;
+
+  Serial.println("--- PH CHANGE ---");
+  Serial.print("pH: ");
+  Serial.println(target_ph);
+  Serial.println("-----------------");
+
+  return RPC_Response();
+}
+
+RPC_Response processRpmChange(const RPC_Data &data) {
+  target_rpm = data;
+  
+  Serial.println("--- RPM CHANGE ---");
+  Serial.print("RPM : ");
+  Serial.println(target_rpm);
+  Serial.println("------------------");
+
+  return RPC_Response();
+}
+
+// RPC handlers
+const size_t callbacks_size = 3;
+RPC_Callback callbacks[callbacks_size] = {
+  { "setTemperature", processTemperatureChange },
+  { "setpH", processPhChange },
+  { "setRPM", processRpmChange }
+};
 
 void setup() {
-  Serial.begin(115200);
+  // Initialise Wire transmission.
   Wire.begin(I2C_SDA, I2C_SCL);
 
-  WiFi.begin(WIFI_AP_NAME, WIFI_PASSWORD);
-  InitWiFi();
+  // Initialise WiFi.
+  connect();
+
+  // Initialise Serial transmission.
+  Serial.begin(115200);
   Serial.println("Setup complete.");
 }
 
@@ -138,48 +121,40 @@ void setup() {
 void loop() {
   long now = millis();
 
-  delay(quant);
-
-  // Reconnect to WiFi, if needed
+  // Reconnect to WiFi, if needed.
   if (WiFi.status() != WL_CONNECTED) {
-    reconnect();
-    return;
+    connect();
   }
 
-  // Reconnect to ThingsBoard, if needed
+  // Reconnect to ThingsBoard, if needed.
   if (!tb.connected()) {
     subscribed = false;
 
     // Connect to the ThingsBoard
-    Serial.print("Connecting to: ");
-    Serial.print(THINGSBOARD_SERVER);
-    Serial.print(" with token ");
-    Serial.println(TOKEN);
-    if (!tb.connect(THINGSBOARD_SERVER, TOKEN)) {
+    Serial.print("Connecting to: "); Serial.print(SERVER); Serial.print(" with token: "); Serial.println(TOKEN);
+    if (!tb.connect(SERVER, TOKEN)) {
       Serial.println("Failed to connect");
       return;
     }
   }
 
-  // Subscribe for RPC, if needed
+  // Subscribe to RPC events, if needed.
   if (!subscribed) {
-    Serial.println("Subscribing for RPC...");
+    Serial.println("Subscribing to RPC events ...");
 
-    // Perform a subscription. All consequent data processing will happen in
-    // callbacks as denoted by callbacks[] array.
     if (!tb.RPC_Subscribe(callbacks, COUNT_OF(callbacks))) {
-      Serial.println("Failed to subscribe for RPC");
+      Serial.println("Failed to subscribe to RPC events.");
       return;
     }
 
-    Serial.println("Subscribe done");
+    Serial.println("Subscribed to RPC events.");
     subscribed = true;
   }
 
   // Send the target values from ThingsBoard to the Nucleo.
   byte data[size];
   packData(data, target_temp, target_ph, target_rpm);
-  Wire.beginTransmission(SLAVE_ADDR);
+  Wire.beginTransmission(NUCLEO);
   Wire.write(data, size);
   Wire.endTransmission();
 
@@ -187,7 +162,8 @@ void loop() {
   // This ensure that the wire buffer is emptied before we request.
   delay(10);
 
-  Wire.requestFrom(SLAVE_ADDR, size);
+  // Request the current values from the Nucleo.
+  Wire.requestFrom(NUCLEO, size);
   if (Wire.available()) {
     byte data[size];
     int i=0;
@@ -195,10 +171,11 @@ void loop() {
       data[i] = Wire.read();
       i++;
     }
+
     unpackData(data, &current_temp, &current_ph, &current_rpm);
 
     // Log the data.
-    Serial.print("Received payload: "); Serial.print(current_temp); Serial.print(" "); Serial.print(current_ph); Serial.print(" "); Serial.println(current_rpm);
+    Serial.print("Received payload: "); Serial.println("{"); Serial.print("  \"Temperature\": "); Serial.print(current_temp); Serial.println(","); Serial.print("  \"pH\": "); Serial.print(current_ph); Serial.println(","); Serial.print("  \"RPM\": "); Serial.println(current_rpm); Serial.println("}");
     
     // Send data to Thingsboard.
     tb.sendTelemetryFloat("Temperature", current_temp);
@@ -207,5 +184,7 @@ void loop() {
   }
 
   // Process messages
-  tb.loop();   
+  tb.loop();
+
+  delay(loop_delay);
 }

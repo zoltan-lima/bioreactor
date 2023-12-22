@@ -9,8 +9,8 @@
 
 // pH pins.
 #define PH_PROBE A1
-#define ACID_PUMP 10 // red
-#define ALKALI_PUMP 11 // black
+#define ACID_PUMP 10
+#define ALKALI_PUMP 11
 
 // Stirring pins.
 #define INTERRUPT 2
@@ -133,7 +133,6 @@ void receiveEvent(int bits) {
   Serial.print("Received payload: "); Serial.println("{"); Serial.print("  \"Temperature\": "); Serial.print(target_temp); Serial.println(","); Serial.print("  \"pH\": "); Serial.print(target_ph); Serial.println(","); Serial.print("  \"RPM\": "); Serial.println(target_rpm); Serial.println("}");
 }
 
-
 void freqcount() {
   pulseT = micros();
   if(pulseT-prevpulseT>6000){
@@ -145,6 +144,7 @@ void freqcount() {
   prevprevpulseT = prevpulseT;
   prevpulseT = pulseT;
 }
+
 void setup() {
   // Connectivity subsystem.
   Wire.begin(ESP32);

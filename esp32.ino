@@ -12,13 +12,12 @@
 #define SSID ""
 #define PASSWORD ""
 
-
-// Helper macro to calculate array size
-#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
-
 // ThingsBoard credentials
 #define SERVER "demo.thingsboard.io"
 #define TOKEN ""
+
+// Helper macro to calculate array size
+#define COUNT_OF(x) ((sizeof(x)/sizeof(0[x])) / ((size_t)(!(sizeof(x) % sizeof(0[x])))))
 
 // Initialise WiFi, PubSub (MQTT) and ThingsBoard clients.
 WiFiClient wifi;
@@ -26,7 +25,6 @@ PubSubClient client(wifi);
 ThingsBoard tb(wifi);
 
 int loop_delay = 1; // ms of delay for loop function.
-bool subscribed = false; // flag for when ESP is subscribed to ThingsBoard.
 
 // Initialise current variables and target defaults.
 double current_temp, current_ph, target_temp = 30, target_ph = 5;
@@ -59,7 +57,7 @@ void connect() {
   }
 
   // WiFi is now connected.
-  Serial.println("Wifi connected.");
+  Serial.println("WiFi connected.");
   Serial.print("IP address: "); Serial.println(WiFi.localIP());
 }
 
@@ -128,27 +126,31 @@ void loop() {
 
   // Reconnect to ThingsBoard, if needed.
   if (!tb.connected()) {
-    subscribed = false;
+    bool connected = false, subscribed = false;
 
-    // Connect to the ThingsBoard
+    // Connect to ThingsBoard.
     Serial.print("Connecting to: "); Serial.print(SERVER); Serial.print(" with token: "); Serial.println(TOKEN);
-    if (!tb.connect(SERVER, TOKEN)) {
-      Serial.println("Failed to connect");
-      return;
-    }
-  }
 
-  // Subscribe to RPC events, if needed.
-  if (!subscribed) {
+    while (!connected) {
+      connected = tb.connect(SERVER, TOKEN);
+      if (!connected) {
+        Serial.println("Failed to connect to ThingsBoard.");
+        delay(500);
+      }
+    }
+
+    // Resubscribe to RPC events.
     Serial.println("Subscribing to RPC events ...");
 
-    if (!tb.RPC_Subscribe(callbacks, COUNT_OF(callbacks))) {
-      Serial.println("Failed to subscribe to RPC events.");
-      return;
+    while(!subscribed) {
+      subscribed = tb.RPC_Subscribe(callbacks, COUNT_OF(callbacks));
+      if (!subscribed) {
+        Serial.println("Failed to subscribe to RPC events.");
+        delay(500);
+      }
     }
 
     Serial.println("Subscribed to RPC events.");
-    subscribed = true;
   }
 
   // Send the target values from ThingsBoard to the Nucleo.
